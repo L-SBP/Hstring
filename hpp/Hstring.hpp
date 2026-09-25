@@ -7,6 +7,10 @@
 #include <initializer_list>
 #include <algorithm>
 #include <limits>
+#include <string>     // std::char_traits
+#include <ostream>    // operator<<
+#include <istream>    // operator>>, getline
+#include <cctype>     // std::isspace
 
 template<typename Allocator = std::allocator<char>>
 class Hstring {
@@ -127,10 +131,59 @@ public:
 
     void swap(Hstring& other) noexcept;
 
+    Hstring substr(size_type pos = 0, size_type count = npos) const;
+
+    size_type copy(char* dest, size_type count, size_type pos = 0) const;
+
+    int compare(const Hstring& str) const;
+    int compare(const char* s) const;
+    int compare(size_type pos, size_type count, const Hstring& str) const;
+
+    size_type find(const Hstring& str, size_type pos = 0) const;
+    size_type find(const char* s, size_type pos = 0) const;
+    size_type find(char ch, size_type pos = 0) const;
+
+    size_type rfind(const Hstring& str, size_type pos = npos) const;
+    size_type rfind(const char* s, size_type pos = npos) const;
+    size_type rfind(char ch, size_type pos = npos) const;
+
+    size_type find_first_of(const Hstring& str, size_type pos = 0) const;
+    size_type find_first_of(const char* s, size_type pos = 0) const;
+    size_type find_first_of(char ch, size_type pos = 0) const;
+
+    size_type find_last_of(const Hstring& str, size_type pos = npos) const;
+    size_type find_last_of(const char* s, size_type pos = npos) const;
+    size_type find_last_of(char ch, size_type pos = npos) const;
+
+    size_type find_first_not_of(const Hstring& str, size_type pos = 0) const;
+    size_type find_first_not_of(const char* s, size_type pos = 0) const;
+    size_type find_first_not_of(char ch, size_type pos = 0) const;
+
+    size_type find_last_not_of(const Hstring& str, size_type pos = npos) const;
+    size_type find_last_not_of(const char* s, size_type pos = npos) const;
+    size_type find_last_not_of(char ch, size_type pos = npos) const;
+
+    // 注意：比较运算符、operator+、operator<<、operator>>、getline 都声明为
+    // 非成员函数（见类定义之后）。原因是它们的左操作数可能是 const char*，
+    // 而成员函数的左操作数必须是本类对象，写成成员会编译失败。
 private:
     char* data_;
     size_type size_;
     size_type capacity_;
+
+    // 空串用 data_ == nullptr 表示，此时 begin() == end() == nullptr。
+    // 对 nullptr 做指针相减是 UB，所以这里显式处理。
+    size_type index_of(const_iterator it) const noexcept {
+        return (data_ == nullptr) ? 0 : static_cast<size_type>(it - data_);
+    }
+
+    // 在 pos 处腾出 count 个字符的空位，把原内容（含结尾 '\0'）整体后移。
+    // src 非空时顺便拷入 src 的 count 个字符；src 为 nullptr 时只腾空间。
+    Hstring& insert_raw(size_type pos, const char* src, size_type count);
+
+    // 用 src 的 n 个字符替换 [pos, pos + len) 区间。
+    // 调用者需保证 pos <= size_ 且 len <= size_ - pos。
+    Hstring& replace_raw(size_type pos, size_type len, const char* src, size_type n);
 };
 
 template<typename Allocator>
@@ -164,6 +217,180 @@ Hstring<Allocator>::Hstring(InputIt first, InputIt last)
     data_ = buf;
     size_ = n;
     capacity_ = cap;
+}
+
+template<typename Allocator>
+template<class InputIt>
+Hstring<Allocator>& Hstring<Allocator>::append(InputIt first, InputIt last) {
+    // 单遍遍历：不能用 std::distance 预先量长度，那会消耗掉
+    // istreambuf_iterator 这类单遍输入迭代器。这里交给 push_back 处理扩容。
+    for(InputIt curr = first; curr != last; ++curr) {
+        push_back(static_cast<char>(*curr));
+    }
+    return *this;
+}
+
+template<typename Allocator>
+template<class InputIt>
+Hstring<Allocator>& Hstring<Allocator>::assign(InputIt first, InputIt last) {
+    clear();
+    for(InputIt curr = first; curr != last; ++curr) {
+        push_back(static_cast<char>(*curr));
+    }
+    return *this;
+}
+
+// ---------------- 非成员比较运算符 ----------------
+// 这些运算符只使用公有接口（size / compare），因此不需要声明为 friend。
+// 定义在头文件中是为了能对任意 Allocator 实例化。
+
+template<typename Allocator>
+inline bool operator==(const Hstring<Allocator>& lhs, const Hstring<Allocator>& rhs) {
+    return lhs.size() == rhs.size() && lhs.compare(rhs) == 0;
+}
+
+template<typename Allocator>
+inline bool operator==(const Hstring<Allocator>& lhs, const char* rhs) {
+    return lhs.compare(rhs) == 0;
+}
+
+template<typename Allocator>
+inline bool operator==(const char* lhs, const Hstring<Allocator>& rhs) {
+    return rhs.compare(lhs) == 0;
+}
+
+template<typename Allocator>
+inline bool operator!=(const Hstring<Allocator>& lhs, const Hstring<Allocator>& rhs) {
+    return !(lhs == rhs);
+}
+
+template<typename Allocator>
+inline bool operator!=(const Hstring<Allocator>& lhs, const char* rhs) {
+    return !(lhs == rhs);
+}
+
+template<typename Allocator>
+inline bool operator!=(const char* lhs, const Hstring<Allocator>& rhs) {
+    return !(lhs == rhs);
+}
+
+// 注意：这些关系运算符必须复用 compare()，不能只比较前 min(len) 个字符——
+// 那样会把 "abc" 和 "abcd" 判为相等，于是 "abc" < "abcd" 得到 false（错误）。
+template<typename Allocator>
+inline bool operator<(const Hstring<Allocator>& lhs, const Hstring<Allocator>& rhs) {
+    return lhs.compare(rhs) < 0;
+}
+
+template<typename Allocator>
+inline bool operator<=(const Hstring<Allocator>& lhs, const Hstring<Allocator>& rhs) {
+    return lhs.compare(rhs) <= 0;
+}
+
+template<typename Allocator>
+inline bool operator>(const Hstring<Allocator>& lhs, const Hstring<Allocator>& rhs) {
+    return lhs.compare(rhs) > 0;
+}
+
+template<typename Allocator>
+inline bool operator>=(const Hstring<Allocator>& lhs, const Hstring<Allocator>& rhs) {
+    return lhs.compare(rhs) >= 0;
+}
+
+// ---------------- 非成员拼接运算符 ----------------
+
+template<typename Allocator>
+inline Hstring<Allocator> operator+(const Hstring<Allocator>& lhs, const Hstring<Allocator>& rhs) {
+    Hstring<Allocator> result;
+    result.reserve(lhs.size() + rhs.size() + 1);
+    result.append(lhs);
+    result.append(rhs);
+    return result;
+}
+
+template<typename Allocator>
+inline Hstring<Allocator> operator+(const Hstring<Allocator>& lhs, const char* rhs) {
+    Hstring<Allocator> result;
+    result.reserve(lhs.size() + std::char_traits<char>::length(rhs) + 1);
+    result.append(lhs);
+    result.append(rhs);
+    return result;
+}
+
+template<typename Allocator>
+inline Hstring<Allocator> operator+(const char* lhs, const Hstring<Allocator>& rhs) {
+    Hstring<Allocator> result;
+    result.reserve(std::char_traits<char>::length(lhs) + rhs.size() + 1);
+    result.append(lhs);
+    result.append(rhs);
+    return result;
+}
+
+template<typename Allocator>
+inline Hstring<Allocator> operator+(const Hstring<Allocator>& lhs, char rhs) {
+    Hstring<Allocator> result;
+    result.reserve(lhs.size() + 2);
+    result.append(lhs);
+    result.push_back(rhs);
+    return result;
+}
+
+template<typename Allocator>
+inline Hstring<Allocator> operator+(char lhs, const Hstring<Allocator>& rhs) {
+    Hstring<Allocator> result;
+    result.reserve(rhs.size() + 2);
+    result.push_back(lhs);
+    result.append(rhs);
+    return result;
+}
+
+template<typename Allocator>
+inline void swap(Hstring<Allocator>& lhs, Hstring<Allocator>& rhs) noexcept {
+    lhs.swap(rhs);
+}
+
+// ---------------- 流输入输出 ----------------
+
+template<typename Allocator>
+inline std::ostream& operator<<(std::ostream& os, const Hstring<Allocator>& str) {
+    if(str.size() != 0) {
+        os.write(str.data(), static_cast<std::streamsize>(str.size()));
+    }
+    return os;
+}
+
+template<typename Allocator>
+inline std::istream& operator>>(std::istream& is, Hstring<Allocator>& str) {
+    // 与 std::string 一致：跳过前导空白，读到下一个空白字符为止。
+    str.clear();
+    std::istream::sentry sen(is);
+    if(!sen)  return is;
+    char c;
+    while(is.get(c)) {
+        if(std::isspace(static_cast<unsigned char>(c))) {
+            is.unget();
+            break;
+        }
+        str.push_back(c);
+    }
+    return is;
+}
+
+template<typename Allocator>
+inline std::istream& getline(std::istream& is, Hstring<Allocator>& str, char delim) {
+    str.clear();
+    std::istream::sentry sen(is, true);   // true：不跳过前导空白
+    if(!sen)  return is;
+    char c;
+    while(is.get(c)) {
+        if(c == delim)  break;
+        str.push_back(c);
+    }
+    return is;
+}
+
+template<typename Allocator>
+inline std::istream& getline(std::istream& is, Hstring<Allocator>& str) {
+    return getline(is, str, '\n');
 }
 
 #endif // HSTRING_HPP
